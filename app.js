@@ -1,8 +1,9 @@
 let keyPair, sharedKey;
 let map, userMarker, peerMarker;
 let ws;
+let keyGenerated = false;
 
-const BACKEND_WS_URL = "https://server-ku5d.onrender.com"; // Replace with your backend URL
+const BACKEND_WS_URL = "https://server-ku5d.onrender.com"; // Replace with your actual server URL
 
 initMap();
 
@@ -12,6 +13,9 @@ function initMap() {
 }
 
 async function generateKeys() {
+  if (keyGenerated) return alert("Key already generated! Refresh to reset.");
+  keyGenerated = true;
+
   keyPair = await window.crypto.subtle.generateKey(
     { name: "ECDH", namedCurve: "P-256" },
     true,
@@ -21,7 +25,6 @@ async function generateKeys() {
   const publicKeyRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
   const b64 = btoa(String.fromCharCode(...new Uint8Array(publicKeyRaw)));
 
-  // Register key with backend
   const response = await fetch(`${BACKEND_WS_URL}/register-key`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -43,45 +46,56 @@ function startQRScanner() {
     { facingMode: "environment" },
     { fps: 10, qrbox: 250 },
     async (scanned) => {
-      await deriveSharedKey(scanned);
+      const success = await deriveSharedKey(scanned);
+      if (success) {
+        document.getElementById("reader").innerHTML = "✅ Key Exchange Complete";
+      } else {
+        document.getElementById("reader").innerHTML = "❌ Invalid QR. Try Again.";
+      }
       reader.stop();
-      document.getElementById("reader").innerHTML = "Key Exchange Complete ✅";
     }
   );
 }
 
 async function deriveSharedKey(peerBase64Key) {
-  const response = await fetch(`${BACKEND_WS_URL}/accept-key`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: peerBase64Key })
-  });
+  try {
+    const response = await fetch(`${BACKEND_WS_URL}/accept-key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: peerBase64Key })
+    });
 
-  if (!response.ok) {
-    alert("Invalid or expired QR key");
-    return;
+    if (!response.ok) {
+      alert("❌ Invalid or expired QR key");
+      return false;
+    }
+
+    const peerRaw = Uint8Array.from(atob(peerBase64Key), c => c.charCodeAt(0));
+    const peerKey = await crypto.subtle.importKey(
+      "raw",
+      peerRaw,
+      { name: "ECDH", namedCurve: "P-256" },
+      true,
+      []
+    );
+
+    sharedKey = await crypto.subtle.deriveKey(
+      { name: "ECDH", public: peerKey },
+      keyPair.privateKey,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
+
+    return true;
+  } catch (err) {
+    console.error("Key derivation failed:", err);
+    return false;
   }
-
-  const peerRaw = Uint8Array.from(atob(peerBase64Key), c => c.charCodeAt(0));
-  const peerKey = await crypto.subtle.importKey(
-    "raw",
-    peerRaw,
-    { name: "ECDH", namedCurve: "P-256" },
-    true,
-    []
-  );
-
-  sharedKey = await crypto.subtle.deriveKey(
-    { name: "ECDH", public: peerKey },
-    keyPair.privateKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
 }
 
 function startSharing() {
-  if (!sharedKey) return alert("Key not established yet.");
+  if (!sharedKey) return alert("❌ Key not established yet.");
 
   ws = new WebSocket(BACKEND_WS_URL.replace("https", "wss"));
 
