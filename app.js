@@ -1,9 +1,9 @@
 let keyPair, sharedKey;
 let map, userMarker, peerMarker;
 let ws;
-let keyGenerated = false;
 
-const BACKEND_WS_URL = "https://server-ku5d.onrender.com"; // Change if different
+const BACKEND_URL = "https://server-ku5d.onrender.com"; // Your deployed server
+const WS_URL = BACKEND_URL.replace("https", "wss");
 
 initMap();
 
@@ -13,9 +13,6 @@ function initMap() {
 }
 
 async function generateKeys() {
-  if (keyGenerated) return alert("Key already generated! Refresh to reset.");
-  keyGenerated = true;
-
   keyPair = await window.crypto.subtle.generateKey(
     { name: "ECDH", namedCurve: "P-256" },
     true,
@@ -25,60 +22,52 @@ async function generateKeys() {
   const publicKeyRaw = await crypto.subtle.exportKey("raw", keyPair.publicKey);
   const b64 = btoa(String.fromCharCode(...new Uint8Array(publicKeyRaw)));
 
-  const response = await fetch(`${BACKEND_WS_URL}/register-key`, {
+  const res = await fetch(`${BACKEND_URL}/create-session`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ key: b64 })
+    body: JSON.stringify({ key: b64 }),
   });
 
-  if (!response.ok) {
-    alert("Failed to register key");
-    return;
-  }
+  const data = await res.json();
 
   document.getElementById("qr").innerHTML = `
-    <img src="https://api.qrserver.com/v1/create-qr-code/?data=${b64}&size=150x150" />
+    <img src="https://api.qrserver.com/v1/create-qr-code/?data=${data.sessionId}&size=150x150" />
   `;
 }
 
 function startQRScanner() {
   const reader = new Html5Qrcode("reader");
-  let scannedOnce = false;
+  let scanned = false;
 
   reader.start(
     { facingMode: "environment" },
     { fps: 10, qrbox: 250 },
-    async (scanned) => {
-      if (scannedOnce) return;
-      scannedOnce = true;
+    async (sessionId) => {
+      if (scanned) return;
+      scanned = true;
 
-      const success = await deriveSharedKey(scanned);
+      const success = await deriveSharedKey(sessionId);
       reader.stop();
-
       document.getElementById("reader").innerHTML = success
         ? "✅ Key Exchange Complete"
         : "❌ Invalid or expired QR key";
-    },
-    (error) => {
-      // Optionally handle scan error
     }
   );
 }
 
-async function deriveSharedKey(peerBase64Key) {
+async function deriveSharedKey(sessionId) {
   try {
-    const response = await fetch(`${BACKEND_WS_URL}/accept-key`, {
+    const res = await fetch(`${BACKEND_URL}/consume-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ key: peerBase64Key })
+      body: JSON.stringify({ sessionId }),
     });
 
-    if (!response.ok) {
-      alert("❌ Invalid or expired QR key");
-      return false;
-    }
+    if (!res.ok) return false;
 
-    const peerRaw = Uint8Array.from(atob(peerBase64Key), c => c.charCodeAt(0));
+    const { key } = await res.json();
+
+    const peerRaw = Uint8Array.from(atob(key), c => c.charCodeAt(0));
     const peerKey = await crypto.subtle.importKey(
       "raw",
       peerRaw,
@@ -96,8 +85,8 @@ async function deriveSharedKey(peerBase64Key) {
     );
 
     return true;
-  } catch (err) {
-    console.error("Key derivation failed:", err);
+  } catch (e) {
+    console.error(e);
     return false;
   }
 }
@@ -105,7 +94,7 @@ async function deriveSharedKey(peerBase64Key) {
 function startSharing() {
   if (!sharedKey) return alert("❌ Key not established yet.");
 
-  ws = new WebSocket(BACKEND_WS_URL.replace("https", "wss"));
+  ws = new WebSocket(WS_URL);
 
   ws.onmessage = async (event) => {
     const { iv, ciphertext } = JSON.parse(event.data);
@@ -121,7 +110,8 @@ function startSharing() {
   navigator.geolocation.watchPosition(async (pos) => {
     const { latitude, longitude } = pos.coords;
     updateUserMarker(latitude, longitude);
-    const iv = window.crypto.getRandomValues(new Uint8Array(12));
+
+    const iv = crypto.getRandomValues(new Uint8Array(12));
     const encoded = new TextEncoder().encode(
       JSON.stringify({ lat: latitude, lon: longitude })
     );
@@ -130,42 +120,34 @@ function startSharing() {
       sharedKey,
       encoded
     );
-    ws.send(
-      JSON.stringify({
-        iv: Array.from(iv),
-        ciphertext: Array.from(new Uint8Array(ciphertext)),
-      })
-    );
+
+    ws.send(JSON.stringify({
+      iv: Array.from(iv),
+      ciphertext: Array.from(new Uint8Array(ciphertext))
+    }));
   });
 
   setTimeout(() => {
     ws.close();
     alert("Location sharing expired.");
-  }, 5 * 60 * 1000); // 5 minutes
+  }, 5 * 60 * 1000); // 5 mins
 }
 
 function updateUserMarker(lat, lon) {
-  if (userMarker) {
-    userMarker.setLatLng([lat, lon]);
-  } else {
-    userMarker = L.marker([lat, lon], { title: "You" }).addTo(map);
-  }
+  if (userMarker) userMarker.setLatLng([lat, lon]);
+  else userMarker = L.marker([lat, lon], { title: "You" }).addTo(map);
   map.setView([lat, lon], 13);
 }
 
 function updatePeerMarker(lat, lon) {
-  if (peerMarker) {
-    peerMarker.setLatLng([lat, lon]);
-  } else {
-    peerMarker = L.marker(
-      [lat, lon],
-      {
-        title: "Peer",
-        icon: L.icon({
-          iconUrl: "https://leafletjs.com/examples/custom-icons/leaf-red.png",
-          iconSize: [25, 41],
-        }),
-      }
-    ).addTo(map);
+  if (peerMarker) peerMarker.setLatLng([lat, lon]);
+  else {
+    peerMarker = L.marker([lat, lon], {
+      title: "Peer",
+      icon: L.icon({
+        iconUrl: "https://leafletjs.com/examples/custom-icons/leaf-red.png",
+        iconSize: [25, 41],
+      }),
+    }).addTo(map);
   }
 }
