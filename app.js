@@ -3,7 +3,7 @@ let map, userMarker, peerMarker;
 let ws;
 let keyGenerated = false;
 
-const BACKEND_WS_URL = "https://server-ku5d.onrender.com"; // Replace with your actual server URL
+const BACKEND_WS_URL = "https://server-ku5d.onrender.com"; // Change if different
 
 initMap();
 
@@ -36,23 +36,31 @@ async function generateKeys() {
     return;
   }
 
-  const qrDiv = document.getElementById("qr");
-  qrDiv.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?data=${b64}&size=150x150" />`;
+  document.getElementById("qr").innerHTML = `
+    <img src="https://api.qrserver.com/v1/create-qr-code/?data=${b64}&size=150x150" />
+  `;
 }
 
 function startQRScanner() {
   const reader = new Html5Qrcode("reader");
+  let scannedOnce = false;
+
   reader.start(
     { facingMode: "environment" },
     { fps: 10, qrbox: 250 },
     async (scanned) => {
+      if (scannedOnce) return;
+      scannedOnce = true;
+
       const success = await deriveSharedKey(scanned);
-      if (success) {
-        document.getElementById("reader").innerHTML = "✅ Key Exchange Complete";
-      } else {
-        document.getElementById("reader").innerHTML = "❌ Invalid QR. Try Again.";
-      }
       reader.stop();
+
+      document.getElementById("reader").innerHTML = success
+        ? "✅ Key Exchange Complete"
+        : "❌ Invalid or expired QR key";
+    },
+    (error) => {
+      // Optionally handle scan error
     }
   );
 }
